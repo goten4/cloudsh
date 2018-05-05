@@ -1,0 +1,318 @@
+#!/bin/bash
+export NODE=$(hostname)
+export CONFIG_DIR=/etc/cloudsh
+export DEFAULT_CONTAINER_CONFIG=${CONFIG_DIR}/default
+export LOG_DIR=/var/log/cloudsh
+export DATE_FORMAT="+%Y-%m-%d %H:%M:%S"
+
+which pvesh > /dev/null 2>&1
+test $? -ne 0 && echo "pvesh have to be installed and available in your PATH" && exit 1
+which lxc-attach > /dev/null 2>&1
+test $? -ne 0 && echo "lxc-attach have to be installed and available in your PATH" && exit 1
+which jq > /dev/null 2>&1
+test $? -ne 0 && echo "jq have to be installed and available in your PATH" && exit 1
+which parallel > /dev/null 2>&1
+test $? -ne 0 && echo "parallel have to be installed and available in your PATH" && exit 1
+
+function usage {
+    echo "Usage: cloudsh COMMAND [NAME]"
+    echo ""
+    echo "cloudsh provides several basics commands for managing VM / containers in ProxmoxVE."
+    echo ""
+    echo "Available Commands:"
+    echo "  create           Create all VMs and containers found in ${CONFIG_DIR}"
+    echo "  status           Get the status of all VMs and containers found in ${CONFIG_DIR}"
+    echo "  start            Start all VMs and containers found in ${CONFIG_DIR}"
+    echo "  stop             Stop all VMs and containers found in ${CONFIG_DIR}"
+    echo "  delete           Delete all VMs and containers found in ${CONFIG_DIR}"
+    echo "  help <command>   Provides help on the specified command"
+    exit 1
+}
+
+function usage_ {
+  usage
+}
+
+function usage_create {
+    echo "Usage: cloudsh create [NAME]"
+    exit 1
+}
+
+function completion {
+  cat <<'EOT'
+_cloudsh()
+{
+    local cur prev opts base
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts="completion create start stop delete status help"
+
+    case "${prev}" in
+        create|start|stop|delete|status)
+            local hostnames=$(find /etc/cloudsh -name '*.conf' -exec basename -s .conf {} \;)
+            COMPREPLY=( $(compgen -W "${hostnames}" -- ${cur}) )
+            return 0
+            ;;
+        *)
+            ;;
+    esac
+
+    if [[ $COMP_CWORD -eq 1 ]]; then
+       COMPREPLY=($(compgen -W "${opts}" -- ${cur}))
+    else
+       COMPREPLY=()
+    fi
+    return 0
+}
+complete -F _cloudsh cloudsh
+EOT
+}
+
+function logdate {
+    date "+%Y-%m-%d %H:%M:%S"
+}
+export -f logdate
+
+function errormsg {
+    >&2 echo $*
+}
+export -f errormsg
+
+function next_vmid {
+    pvesh get /cluster/nextid 2>/dev/null | tr -d '"' || return 1
+}
+export -f next_vmid
+
+function get_vmid_by_hostname {
+    pvesh get /cluster/resources -type=vm 2>/dev/null | jq ".[] | select(.name == \"$1\") | .vmid"
+}
+export -f get_vmid_by_hostname
+
+function get_vm_status {
+    pvesh get /nodes/${NODE}/lxc/$1/status/current 2>/dev/null | jq '.status' | tr -d '"'
+}
+export -f get_vm_status
+
+function net_parameter {
+    if [ "${ip}" == "dhcp" ]; then
+        echo -n bridge=${bridge},name=${net_interface},ip=dhcp
+    else
+        echo -n bridge=${bridge},name=${net_interface},ip=${ip}/24,gw=${gw}
+    fi
+}
+export -f net_parameter
+
+function get_all_configfile_to_create {
+    for file in $(ls ${CONFIG_DIR}/*.conf); do
+        source ${file}
+        if [ -z "$(get_vmid_by_hostname ${hostname})" ]; then
+            echo ${file}
+        fi
+    done
+}
+export -f get_all_configfile_to_create
+
+function create_container {
+    CONTAINER_CONFIG=$1
+    if [ ! -r "${CONTAINER_CONFIG}" ]; then
+        errormsg "Cannot read container configuration file : '${CONTAINER_CONFIG}'"
+        return 1
+    fi
+    if [ -n "$2" ]; then
+        LOG_FILE=$2
+    else
+        LOG_FILE="${LOG_DIR}/$(basename -s .conf ${CONTAINER_CONFIG}).log"
+    fi
+    source ${DEFAULT_CONTAINER_CONFIG}
+    source ${CONTAINER_CONFIG}
+    vmid=$(next_vmid)
+    if [ $? != 0 ]; then
+        errormsg "Unable to retrieve next VMID"
+        return 1
+    fi
+    if [ -n "$(get_vmid_by_hostname ${hostname})" ]; then
+        errormsg "VM ${hostname} already exists"
+        return 1
+    fi
+    if [ -z "${password}" ]; then
+        errormsg "Missing password for ${hostname}"
+        return 1
+    fi
+    if [ -f ${LOG_FILE} ]; then
+        mv ${LOG_FILE} ${LOG_FILE}.1
+    fi
+    echo "###############################################################################" >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Create container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo  >> ${LOG_FILE} 2>&1
+    pvesh create /nodes/${NODE}/lxc --hostname ${hostname} --vmid ${vmid} --storage ${storage} --password "${password}" --ostemplate ${ostemplate} --memory ${memory} --swap ${swap} --cores ${cores} --rootfs ${rootfs} --net0 "$(net_parameter)" --ssh-public-keys "${ssh_public_keys}" >> ${LOG_FILE} 2>&1
+    if [ $? != 0 ]; then
+        return 1
+    fi
+    echo  >> ${LOG_FILE} 2>&1
+    echo "###############################################################################" >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Start container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo  >> ${LOG_FILE} 2>&1
+    pvesh create /nodes/${NODE}/lxc/${vmid}/status/start >> ${LOG_FILE} 2>&1
+    while [ "$(get_vm_status ${vmid})" != "running" ]; do
+        echo "Waiting for ${hostname} to be running..." >> ${LOG_FILE} 2>&1
+        sleep 3
+    done
+    echo  >> ${LOG_FILE} 2>&1
+    echo "###############################################################################" >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Initialize container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo  >> ${LOG_FILE} 2>&1
+    if [ -r "${script}" ]; then
+        <${script_default_env} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat > /tmp/init.env" >> ${LOG_FILE} 2>&1
+        if [ -n "${script_env}" ]; then
+            <${script_env} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat >> /tmp/init.env" >> ${LOG_FILE} 2>&1
+        fi
+        <${script} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat > /tmp/init.sh && chmod +x /tmp/init.sh" >> ${LOG_FILE} 2>&1
+        lxc-attach -n ${vmid} -- /tmp/init.sh >> ${LOG_FILE} 2>&1
+    fi
+    echo  >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Container ${hostname} (${vmid}) created !" >> ${LOG_FILE} 2>&1
+}
+export -f create_container
+
+function start_container {
+    CONTAINER_CONFIG=$1
+    if [ ! -r "${CONTAINER_CONFIG}" ]; then
+        errormsg "Cannot read container configuration file : '$1'"
+        return 1
+    fi
+    source ${CONTAINER_CONFIG}
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        errormsg "Unknown container '${hostname}'"
+        return 1
+    fi
+    if [ "$(get_vm_status ${vmid})" == "stopped" ]; then
+        echo "Start container ${hostname} (${vmid})..."
+        pvesh create /nodes/${NODE}/lxc/${vmid}/status/start >/dev/null
+    fi
+}
+export -f start_container
+
+function stop_container {
+    CONTAINER_CONFIG=$1
+    if [ ! -r "${CONTAINER_CONFIG}" ]; then
+        errormsg "Cannot read container configuration file : '$1'"
+        return 1
+    fi
+    source ${CONTAINER_CONFIG}
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        errormsg "Unknown container '${hostname}'"
+        return 1
+    fi
+    if [ "$(get_vm_status ${vmid})" == "stopped" ]; then
+        echo "Stop container ${hostname} (${vmid})..."
+        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null
+    fi
+}
+export -f start_container
+
+function delete_container {
+    CONTAINER_CONFIG=$1
+    if [ ! -r "${CONTAINER_CONFIG}" ]; then
+        errormsg "Cannot read container configuration file : '$1'"
+        return 1
+    fi
+    source ${CONTAINER_CONFIG}
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        errormsg "Unknown container '${hostname}'"
+        return 1
+    fi
+    if [ "$(get_vm_status ${vmid})" != "stopped" ]; then
+        echo "Stop container ${hostname} (${vmid})..."
+        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null
+    fi
+    echo "Delete container ${hostname} (${vmid})..."
+    pvesh delete /nodes/${NODE}/lxc/${vmid} >/dev/null
+}
+export -f delete_container
+
+function print_container_status {
+    CONTAINER_CONFIG=$1
+    if [ ! -r "${CONTAINER_CONFIG}" ]; then
+        errormsg "Cannot read container configuration file : '$1'"
+        return 1
+    fi
+    source ${CONTAINER_CONFIG}
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        printf "│ %-4s │ %-30s │ %-10s │\n" "" ${hostname} "unknown"
+    else
+        printf "│ %-4s │ %-30s │ %-10s │\n" ${vmid} ${hostname} $(get_vm_status ${vmid})
+    fi
+}
+
+################################################################################
+# Main function
+#
+
+if [ -z "$1" ]
+then
+  usage
+fi
+COMMAND=$1
+shift
+NAME=$1
+
+case ${COMMAND} in
+    completion)
+        completion $*
+        ;;
+    create)
+        if [ -n "${NAME}" ]; then
+            create_container ${CONFIG_DIR}/${NAME}.conf /dev/stdout
+        else
+            mkdir -p ${LOG_DIR}
+            parallel -j8 --delay 4 --joblog ${LOG_DIR}/cloudsh.log create_container ::: $(get_all_configfile_to_create)
+        fi
+        ;;
+    start)
+        if [ -n "${NAME}" ]; then
+            start_container ${CONFIG_DIR}/${NAME}.conf
+        else
+            parallel -j8 start_container ::: $(ls ${CONFIG_DIR}/*.conf)
+        fi
+        ;;
+    stop)
+        if [ -n "${NAME}" ]; then
+            stop_container ${CONFIG_DIR}/${NAME}.conf
+        else
+            parallel -j8 stop_container ::: $(ls ${CONFIG_DIR}/*.conf)
+        fi
+        ;;
+    delete)
+        if [ -n "${NAME}" ]; then
+            delete_container ${CONFIG_DIR}/${NAME}.conf
+        else
+            parallel -j8 delete_container ::: $(ls ${CONFIG_DIR}/*.conf)
+        fi
+        ;;
+    status)
+        echo "┌──────┬────────────────────────────────┬────────────┐"
+        printf "│ %-4s │ %-30s │ %-10s │\n" "VMID" "HOSTNAME" "STATUS"
+        echo "├──────┼────────────────────────────────┼────────────┤"
+        if [ -n "${NAME}" ]; then
+            print_container_status ${CONFIG_DIR}/${NAME}.conf
+        else
+            for container_config in $(ls ${CONFIG_DIR}/*.conf); do
+                print_container_status ${container_config}
+            done
+        fi
+        echo "└──────┴────────────────────────────────┴────────────┘"
+        ;;
+    help)
+        [[ ! "$1" =~ ^(""|completion|create|start|stop|status|delete)$ ]] && error "Invalid command !" && usage
+        usage_$1
+        ;;
+    *)
+        errormsg "Invalid command !"
+        usage
+        ;;
+esac
