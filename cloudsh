@@ -1,4 +1,10 @@
 #!/bin/bash
+
+# This script is based on :
+#  O. Tange (2011): GNU Parallel - The Command-Line Power Tool, 
+# ;login: The USENIX Magazine, February 2011:42-47.
+#
+
 export NODE=$(hostname)
 export CONFIG_DIR=/etc/cloudsh
 export DEFAULT_CONTAINER_CONFIG=${CONFIG_DIR}/default
