@@ -256,7 +256,7 @@ function start_lxc {
     fi
     if [ "$(get_status lxc ${vmid})" == "stopped" ]; then
         echo "Start container ${hostname} (${vmid})..."
-        pvesh create /nodes/${NODE}/lxc/${vmid}/status/start >/dev/null
+        pvesh create /nodes/${NODE}/lxc/${vmid}/status/start >/dev/null 2>&1
     fi
 }
 export -f start_lxc
@@ -275,7 +275,7 @@ function stop_lxc {
     fi
     if [ "$(get_status lxc ${vmid})" == "stopped" ]; then
         echo "Stop container ${hostname} (${vmid})..."
-        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null
+        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null 2>&1
     fi
 }
 export -f stop_lxc
@@ -294,10 +294,10 @@ function delete_lxc {
     fi
     if [ "$(get_status lxc ${vmid})" != "stopped" ]; then
         echo "Stop container ${hostname} (${vmid})..."
-        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null
+        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null 2>&1
     fi
     echo "Delete container ${hostname} (${vmid})..."
-    pvesh delete /nodes/${NODE}/lxc/${vmid} >/dev/null
+    pvesh delete /nodes/${NODE}/lxc/${vmid} >/dev/null 2>&1
 }
 export -f delete_lxc
 
