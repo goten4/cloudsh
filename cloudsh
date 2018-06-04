@@ -36,15 +36,6 @@ function usage {
     exit 1
 }
 
-function usage_ {
-  usage
-}
-
-function usage_create {
-    echo "Usage: cloudsh create [NAME]"
-    exit 1
-}
-
 function completion {
   cat <<'EOT'
 _cloudsh()
@@ -374,8 +365,7 @@ case ${COMMAND} in
         echo "└──────┴────────────────────────────────┴────────────┘"
         ;;
     help)
-        [[ ! "$1" =~ ^(""|completion|create|start|stop|status|delete)$ ]] && error "Invalid command !" && usage
-        usage_$1
+        usage
         ;;
     *)
         errormsg "Invalid command !"
