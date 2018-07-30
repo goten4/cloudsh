@@ -7,8 +7,8 @@
 
 export NODE=$(hostname)
 export CONFIG_DIR=/etc/cloudsh
-export DEFAULT_LXC_CONFIG=${CONFIG_DIR}/lxc.default
-export DEFAULT_QEMU_CONFIG=${CONFIG_DIR}/qemu.default
+export DEFAULT_LXC_CONFIG=${CONFIG_DIR}/defaults.lxc
+export DEFAULT_QEMU_CONFIG=${CONFIG_DIR}/defaults.qemu
 export LOG_DIR=/var/log/cloudsh
 export DATE_FORMAT="+%Y-%m-%d %H:%M:%S"
 
@@ -47,12 +47,7 @@ _cloudsh()
     opts="completion create start stop delete status help"
 
     case "${prev}" in
-        create)
-            local hostnames=$(find /etc/cloudsh -name '*.conf' -exec basename -s .conf {} \;)
-            COMPREPLY=( $(compgen -W "${hostnames}" -- ${cur}) )
-            return 0
-            ;;
-        start|stop|delete|status)
+        create|start|stop|delete|status)
             local hostnames=$(find /etc/cloudsh -name '*.conf' -exec basename -s .conf {} \;)
             COMPREPLY=( $(compgen -W "${hostnames}" -- ${cur}) )
             return 0
@@ -87,6 +82,18 @@ function next_vmid {
 }
 export -f next_vmid
 
+function type_name {
+    case $1 in
+        lxc)
+            echo "container"
+            ;;
+        *)
+            echo "VM"
+            ;;
+    esac
+}
+export -f type_name
+
 function get_vmid_by_hostname {
     pvesh get /cluster/resources -type=vm 2>/dev/null | jq ".[] | select(.name == \"$1\") | .vmid"
 }
@@ -97,46 +104,15 @@ function get_status {
 }
 export -f get_status
 
-function net_parameter {
-    if [ "${ip}" == "dhcp" ]; then
-        echo -n bridge=${bridge},name=${net_interface},ip=dhcp
-    else
-        echo -n bridge=${bridge},name=${net_interface},ip=${ip}/24,gw=${gw}
-    fi
-}
-export -f net_parameter
-
 function get_all_configfile_to_create {
-    for file in $(ls ${CONFIG_DIR}/*.conf); do
-        source ${file}
+    for file in $(ls ${CONFIG_DIR}/*.json); do
+        hostname=$(cat ${file} | jq -r '.params.hostname')
         if [ -z "$(get_vmid_by_hostname ${hostname})" ]; then
             echo ${file}
         fi
     done
 }
 export -f get_all_configfile_to_create
-
-function unset_all_variables {
-    unset vmid
-    unset hostname
-    unset count
-    unset password
-    unset storage
-    unset ostemplate
-    unset memory
-    unset swap
-    unset cores
-    unset rootfs
-    unset ssh_public_keys
-    unset bridge
-    unset net_interface
-    unset gw
-    unset script
-    unset script_default_env
-    unset ip
-    unset script_env
-}
-export -f unset_all_variables
 
 function run_command {
     COMMAND=$1
@@ -146,7 +122,7 @@ function run_command {
         errormsg "Missing command !"
         return 1
     fi
-    if [[ !"${COMMAND}}" =~ ^(create|start|stop|delete|print_status)$ ]]; then
+    if [[ !"${COMMAND}}" =~ ^(create|start|stop|delete|status)$ ]]; then
         errormsg "Invalid command '${COMMAND}' !"
         return 1
     fi
@@ -154,41 +130,241 @@ function run_command {
         errormsg "Cannot read configuration file : '${CONFIG}'"
         return 1
     fi
-    unset type
-    eval $(grep "^type=" ${CONFIG})
-    if [[ !"${type}}" =~ ^(lxc|qemu)$ ]]; then
-        if [ -z "${TYPE}" ]; then
-            errormsg "Missing type in '${CONFIG}' : expected lxc or qemu !"
-            return 1
-        else
-            errormsg "Invalid type '${type}' in '${CONFIG}' : expected lxc or qemu !"
-            return 1
-        fi
+    type=$(cat ${CONFIG} | jq -r '.type')
+    if [ "${type}" == 'null' ]; then
+        errormsg "Missing type in '${CONFIG}' : expected lxc or qemu !"
+        return 1
+    elif [[ !"${type}}" =~ ^(lxc|qemu)$ ]]; then
+        errormsg "Invalid type '${type}' in '${CONFIG}' : expected lxc or qemu !"
+        return 1
     fi
-    ${COMMAND}_${type} $*
+    ${COMMAND} ${type} $*
 }
 export -f run_command
 
-function create_lxc {
-    CONFIG=$1
-    if [ ! -r "${CONFIG}" ]; then
-        errormsg "Cannot read configuration file : '${CONFIG}'"
+function create {
+    TYPE=$1
+    shift
+    create_${TYPE} $*
+}
+export -f create
+
+function start {
+    TYPE=$1
+    CONFIG=$2
+    if [ ${TYPE} == "lxc" ]; then
+        hostname=$(cat ${CONFIG} | jq -r '.params.hostname')
+    else
+        hostname=$(cat ${CONFIG} | jq -r '.params.name')
+    fi
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        errormsg "Unknown $(type_name ${TYPE}) '${hostname}'"
         return 1
     fi
+    if [ "$(get_status ${TYPE} ${vmid})" == "stopped" ]; then
+        echo "Start $(type_name ${TYPE}) ${hostname} (${vmid})..."
+        pvesh create /nodes/${NODE}/${TYPE}/${vmid}/status/start >/dev/null 2>&1
+    fi
+}
+export -f start
+
+function stop {
+    TYPE=$1
+    CONFIG=$2
+    if [ ${TYPE} == "lxc" ]; then
+        hostname=$(cat ${CONFIG} | jq -r '.params.hostname')
+    else
+        hostname=$(cat ${CONFIG} | jq -r '.params.name')
+    fi
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        errormsg "Unknown $(type_name ${TYPE}) '${hostname}'"
+        return 1
+    fi
+    if [ "$(get_status ${TYPE} ${vmid})" == "stopped" ]; then
+        echo "Stop $(type_name ${TYPE}) ${hostname} (${vmid})..."
+        pvesh create /nodes/${NODE}/${TYPE}/${vmid}/status/stop >/dev/null 2>&1
+    fi
+}
+export -f stop
+
+function delete {
+    TYPE=$1
+    CONFIG=$2
+    if [ ${TYPE} == "lxc" ]; then
+        hostname=$(cat ${CONFIG} | jq -r '.params.hostname')
+    else
+        hostname=$(cat ${CONFIG} | jq -r '.params.name')
+    fi
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        errormsg "Unknown $(type_name ${TYPE}) '${hostname}'"
+        return 1
+    fi
+    if [ "$(get_status ${TYPE} ${vmid})" != "stopped" ]; then
+        echo "Stop $(type_name ${TYPE}) ${hostname} (${vmid})..."
+        pvesh create /nodes/${NODE}/${TYPE}/${vmid}/status/stop >/dev/null 2>&1
+    fi
+    echo "Delete $(type_name ${TYPE}) ${hostname} (${vmid})..."
+    pvesh delete /nodes/${NODE}/${TYPE}/${vmid} >/dev/null 2>&1
+}
+export -f delete
+
+function status {
+    TYPE=$1
+    CONFIG=$2
+    if [ "${TYPE}" == "lxc" ]; then
+        hostname=$(cat ${CONFIG} | jq -r '.params.hostname')
+    else
+        hostname=$(cat ${CONFIG} | jq -r '.params.name')
+    fi
+    vmid=$(get_vmid_by_hostname ${hostname})
+    if [ -z "${vmid}" ]; then
+        printf "│ %-4s │ %-30s │ %-10s │\n" "" ${hostname} "unknown"
+    else
+        printf "│ %-4s │ %-30s │ %-10s │\n" ${vmid} ${hostname} $(get_status ${TYPE} ${vmid})
+    fi
+}
+export -f status
+
+function format_params {
+    eval "declare -A params="${1#*=}
+    for param in "${!params[@]}"; do
+        echo -n " --${param} \"${params[${param}]}\""
+    done
+}
+export -f format_params
+
+################################################################################
+# LXC specific functions
+#
+
+function create_lxc {
+    CONFIG=$1
+
+    # Initialize log file
     if [ -n "$2" ]; then
         LOG_FILE=$2
     else
         LOG_FILE="${LOG_DIR}/$(basename -s .conf ${CONFIG}).log"
     fi
-    unset_all_variables
-    source ${DEFAULT_LXC_CONFIG}
-    source ${CONFIG}
+
+    # Declare an associative array for the configuration of the container
+    declare -A config
+
+    # Load default configuration for LXC containers
+    default_config_content=$(cat ${DEFAULT_LXC_CONFIG})
+    init_script=$(echo ${default_config_content} | jq -r '.init_script')
+    init_script_default_env=$(echo ${default_config_content} | jq -r '.init_script_default_env')
+    init_script_env=$(echo ${default_config_content} | jq -r '.init_script_env')
+    for param in $(echo ${default_config_content} | jq -r '.params|to_entries[]|.key'); do
+        if [ "${param}" != "null" ]; then
+            config["${param}"]=$(echo ${default_config_content} | jq -r --arg param "${param}" '.params|.[$param]')
+        fi
+    done
+
+    # Load the specific configuration of the container
+    config_content=$(cat ${CONFIG})
+    if [ $(echo ${config_content} | jq -r '.init_script') != 'null' ]; then
+        init_script=$(echo ${config_content} | jq -r '.init_script')
+    fi
+    if [ $(echo ${config_content} | jq -r '.init_script_default_env') != 'null' ]; then
+        init_script_default_env=$(echo ${config_content} | jq -r '.init_script_default_env')
+    fi
+    if [ $(echo ${config_content} | jq -r '.init_script_env') != 'null' ]; then
+        init_script_env=$(echo ${config_content} | jq -r '.init_script_env')
+    fi
+    for param in $(echo ${config_content} | jq -r '.params|to_entries[]|.key'); do
+        if [ "${param}" != "null" ]; then
+            config["${param}"]=$(echo ${config_content} | jq -r --arg param "${param}" '.params|.[$param]')
+        fi
+    done
+
+    # Validate hostname
+    hostname=${config['hostname']}
     if [ -n "$(get_vmid_by_hostname ${hostname})" ]; then
-        errormsg "VM ${hostname} already exists"
+        errormsg "Container ${hostname} already exists"
         return 1
     fi
-    if [ -z "${password}" ]; then
-        errormsg "Missing password for ${hostname}"
+
+    # If log file already exists then rotate it
+    if [ -f ${LOG_FILE} ]; then
+        mv ${LOG_FILE} ${LOG_FILE}.1
+    fi
+
+    # Retrieve the VMID
+    vmid=$(next_vmid)
+    if [ $? != 0 ]; then
+        errormsg "Unable to retrieve next VMID"
+        return 1
+    fi
+
+    echo "###############################################################################" >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Create container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo  >> ${LOG_FILE} 2>&1
+    eval "pvesh create /nodes/${NODE}/lxc --vmid ${vmid} $(format_params "$(declare -p config)") >> ${LOG_FILE} 2>&1"
+    if [ $? != 0 ]; then
+        return 1
+    fi
+    echo  >> ${LOG_FILE} 2>&1
+
+    echo "###############################################################################" >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Start container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo  >> ${LOG_FILE} 2>&1
+    pvesh create /nodes/${NODE}/lxc/${vmid}/status/start >> ${LOG_FILE} 2>&1
+    while [ "$(get_status lxc ${vmid})" != "running" ]; do
+        echo "Waiting for ${hostname} to be running..." >> ${LOG_FILE} 2>&1
+        sleep 3
+    done
+    echo  >> ${LOG_FILE} 2>&1
+
+    echo "###############################################################################" >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Initialize container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo  >> ${LOG_FILE} 2>&1
+    if [ -r "${init_script}" ]; then
+        <${init_script_default_env} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat > /tmp/init.env" >> ${LOG_FILE} 2>&1
+        if [ -n "${init_script_env}" ]; then
+            <${init_script_env} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat >> /tmp/init.env" >> ${LOG_FILE} 2>&1
+        fi
+        <${init_script} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat > /tmp/init.sh && chmod +x /tmp/init.sh" >> ${LOG_FILE} 2>&1
+        lxc-attach -n ${vmid} -- /tmp/init.sh >> ${LOG_FILE} 2>&1
+    fi
+    echo  >> ${LOG_FILE} 2>&1
+
+    echo "$(logdate) Container ${hostname} (${vmid}) created !" >> ${LOG_FILE} 2>&1
+    echo "Container ${hostname} (${vmid}) created !"
+}
+export -f create_lxc
+
+
+################################################################################
+# QEMU specific functions
+#
+
+function create_qemu {
+    CONFIG=$1
+    if [ -n "$2" ]; then
+        LOG_FILE=$2
+    else
+        LOG_FILE="${LOG_DIR}/$(basename -s .conf ${CONFIG}).log"
+    fi
+    declare -A config
+    default_config_content=$(cat ${DEFAULT_QEMU_CONFIG})
+    for param in $(echo ${default_config_content} | jq -r '.params|to_entries[]|.key'); do
+        if [ "${param}" != "null" ]; then
+            config["${param}"]=$(echo ${default_config_content} | jq -r --arg param "${param}" '.params|.[$param]')
+        fi
+    done
+    config_content=$(cat ${CONFIG})
+    for param in $(echo ${config_content} | jq -r '.params|to_entries[]|.key'); do
+        if [ "${param}" != "null" ]; then
+            config["${param}"]=$(echo ${config_content} | jq -r --arg param "${param}" '.params|.[$param]')
+        fi
+    done
+    hostname=${config['name']}
+    if [ -n "$(get_vmid_by_hostname ${hostname})" ]; then
+        errormsg "Container ${hostname} already exists"
         return 1
     fi
     if [ -f ${LOG_FILE} ]; then
@@ -200,113 +376,27 @@ function create_lxc {
         return 1
     fi
     echo "###############################################################################" >> ${LOG_FILE} 2>&1
-    echo "$(logdate) Create container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Create VM ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
     echo  >> ${LOG_FILE} 2>&1
-    pvesh create /nodes/${NODE}/lxc --hostname ${hostname} --vmid ${vmid} --storage ${storage} --password "${password}" --ostemplate ${ostemplate} --memory ${memory} --swap ${swap} --cores ${cores} --rootfs ${rootfs} --net0 "$(net_parameter)" --ssh-public-keys "${ssh_public_keys}" >> ${LOG_FILE} 2>&1
+    pvesh create /nodes/${NODE}/qemu --vmid ${vmid} $(format_params "$(declare -p config)") >> ${LOG_FILE} 2>&1
     if [ $? != 0 ]; then
         return 1
     fi
     echo  >> ${LOG_FILE} 2>&1
     echo "###############################################################################" >> ${LOG_FILE} 2>&1
-    echo "$(logdate) Start container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
+    echo "$(logdate) Start VM ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
     echo  >> ${LOG_FILE} 2>&1
-    pvesh create /nodes/${NODE}/lxc/${vmid}/status/start >> ${LOG_FILE} 2>&1
-    while [ "$(get_status lxc ${vmid})" != "running" ]; do
+    pvesh create /nodes/${NODE}/qemu/${vmid}/status/start >> ${LOG_FILE} 2>&1
+    while [ "$(get_status qemu ${vmid})" != "running" ]; do
         echo "Waiting for ${hostname} to be running..." >> ${LOG_FILE} 2>&1
         sleep 3
     done
     echo  >> ${LOG_FILE} 2>&1
-    echo "###############################################################################" >> ${LOG_FILE} 2>&1
-    echo "$(logdate) Initialize container ${hostname} (${vmid})..." >> ${LOG_FILE} 2>&1
-    echo  >> ${LOG_FILE} 2>&1
-    if [ -r "${script}" ]; then
-        <${script_default_env} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat > /tmp/init.env" >> ${LOG_FILE} 2>&1
-        if [ -n "${script_env}" ]; then
-            <${script_env} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat >> /tmp/init.env" >> ${LOG_FILE} 2>&1
-        fi
-        <${script} lxc-attach -n ${vmid} -- /bin/sh -c "/bin/cat > /tmp/init.sh && chmod +x /tmp/init.sh" >> ${LOG_FILE} 2>&1
-        lxc-attach -n ${vmid} -- /tmp/init.sh >> ${LOG_FILE} 2>&1
-    fi
-    echo  >> ${LOG_FILE} 2>&1
     echo "$(logdate) Container ${hostname} (${vmid}) created !" >> ${LOG_FILE} 2>&1
     echo "Container ${hostname} (${vmid}) created !"
 }
-export -f create_lxc
+export -f create_qemu
 
-function start_lxc {
-    CONFIG=$1
-    if [ ! -r "${CONFIG}" ]; then
-        errormsg "Cannot read configuration file : '$1'"
-        return 1
-    fi
-    source ${CONFIG}
-    vmid=$(get_vmid_by_hostname ${hostname})
-    if [ -z "${vmid}" ]; then
-        errormsg "Unknown container '${hostname}'"
-        return 1
-    fi
-    if [ "$(get_status lxc ${vmid})" == "stopped" ]; then
-        echo "Start container ${hostname} (${vmid})..."
-        pvesh create /nodes/${NODE}/lxc/${vmid}/status/start >/dev/null 2>&1
-    fi
-}
-export -f start_lxc
-
-function stop_lxc {
-    CONFIG=$1
-    if [ ! -r "${CONFIG}" ]; then
-        errormsg "Cannot read container configuration file : '$1'"
-        return 1
-    fi
-    source ${CONFIG}
-    vmid=$(get_vmid_by_hostname ${hostname})
-    if [ -z "${vmid}" ]; then
-        errormsg "Unknown container '${hostname}'"
-        return 1
-    fi
-    if [ "$(get_status lxc ${vmid})" == "stopped" ]; then
-        echo "Stop container ${hostname} (${vmid})..."
-        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null 2>&1
-    fi
-}
-export -f stop_lxc
-
-function delete_lxc {
-    CONFIG=$1
-    if [ ! -r "${CONFIG}" ]; then
-        errormsg "Cannot read configuration file : '$1'"
-        return 1
-    fi
-    source ${CONFIG}
-    vmid=$(get_vmid_by_hostname ${hostname})
-    if [ -z "${vmid}" ]; then
-        errormsg "Unknown container '${hostname}'"
-        return 1
-    fi
-    if [ "$(get_status lxc ${vmid})" != "stopped" ]; then
-        echo "Stop container ${hostname} (${vmid})..."
-        pvesh create /nodes/${NODE}/lxc/${vmid}/status/stop >/dev/null 2>&1
-    fi
-    echo "Delete container ${hostname} (${vmid})..."
-    pvesh delete /nodes/${NODE}/lxc/${vmid} >/dev/null 2>&1
-}
-export -f delete_lxc
-
-function print_status_lxc {
-    CONFIG=$1
-    if [ ! -r "${CONFIG}" ]; then
-        errormsg "Cannot read configuration file : '$1'"
-        return 1
-    fi
-    source ${CONFIG}
-    vmid=$(get_vmid_by_hostname ${hostname})
-    if [ -z "${vmid}" ]; then
-        printf "│ %-4s │ %-30s │ %-10s │\n" "" ${hostname} "unknown"
-    else
-        printf "│ %-4s │ %-30s │ %-10s │\n" ${vmid} ${hostname} $(get_status lxc ${vmid})
-    fi
-}
-export -f print_status_lxc
 
 ################################################################################
 # Main function
@@ -326,31 +416,31 @@ case ${COMMAND} in
         ;;
     create)
         if [ -n "${NAME}" ]; then
-            create_lxc ${CONFIG_DIR}/${NAME}.conf /dev/stdout
+            run_command create ${CONFIG_DIR}/${NAME}.json /dev/stdout
         else
             mkdir -p ${LOG_DIR}
-            parallel -j8 --delay 4 --joblog ${LOG_DIR}/cloudsh.log create_lxc ::: $(get_all_configfile_to_create)
+            parallel -j8 --delay 4 --joblog ${LOG_DIR}/cloudsh.log run_command create ::: $(get_all_configfile_to_create)
         fi
         ;;
     start)
         if [ -n "${NAME}" ]; then
-            start_lxc ${CONFIG_DIR}/${NAME}.conf
+            run_command start ${CONFIG_DIR}/${NAME}.json
         else
-            parallel -j8 start_lxc ::: $(ls ${CONFIG_DIR}/*.conf)
+            parallel -j8 run_command start ::: $(ls ${CONFIG_DIR}/*.json)
         fi
         ;;
     stop)
         if [ -n "${NAME}" ]; then
-            stop_lxc ${CONFIG_DIR}/${NAME}.conf
+            run_command stop ${CONFIG_DIR}/${NAME}.json
         else
-            parallel -j8 stop_lxc ::: $(ls ${CONFIG_DIR}/*.conf)
+            parallel -j8 run_command stop ::: $(ls ${CONFIG_DIR}/*.json)
         fi
         ;;
     delete)
         if [ -n "${NAME}" ]; then
-            delete_lxc ${CONFIG_DIR}/${NAME}.conf
+            run_command delete ${CONFIG_DIR}/${NAME}.json
         else
-            parallel -j8 delete_lxc ::: $(ls ${CONFIG_DIR}/*.conf)
+            parallel -j8 run_command delete ::: $(ls ${CONFIG_DIR}/*.json)
         fi
         ;;
     status)
@@ -358,9 +448,9 @@ case ${COMMAND} in
         printf "│ %-4s │ %-30s │ %-10s │\n" "VMID" "HOSTNAME" "STATUS"
         echo "├──────┼────────────────────────────────┼────────────┤"
         if [ -n "${NAME}" ]; then
-            print_status_lxc ${CONFIG_DIR}/${NAME}.conf
+            run_command status ${CONFIG_DIR}/${NAME}.json
         else
-            parallel -j20 --delay=0.5 print_status_lxc ::: $(ls ${CONFIG_DIR}/*.conf)
+            parallel -j20 --delay=0.5 run_command status ::: $(ls ${CONFIG_DIR}/*.json)
         fi
         echo "└──────┴────────────────────────────────┴────────────┘"
         ;;

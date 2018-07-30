@@ -1,0 +1,15 @@
+{
+  "init_script": "/etc/cloudsh/init.sh",
+  "init_script_default_env": "/etc/cloudsh/init.env",
+  "params": {
+    "storage": "local",
+    "ostemplate": "local:vztmpl/debian-9.0-standard_9.3-1_amd64.tar.gz",
+    "memory": "2048",
+    "swap": "1024",
+    "cores": "2",
+    "rootfs": "local:40",
+    "password": "strongpassword",
+    "net0": "bridge=vmbr0,name=eth0,ip=dhcp",
+    "ssh-public-keys": "ssh-rsa AAAAB3NzaC1yc2EBDSSDAQABAAACAQDpun8pN5LIULUnxlMHYM8yocjtARQTzEEbwbZ0rdNDm9kJpl3mnXgGkXS8IGtl0elVDoV6eLjeEJRymS25kgwMU17CkFiRObLKQ68w1psFalBvcpHv4T47bkRJfv91RHAdJBYJUscguOVKiDetYVyGy7OJFdXlXFYmeaD2xXPL9ucLwTgPPlQyZya/k83L63Tyjf+qlcofLE18ve5U+QG8/SlpMcSMpk6WAfxdcXiqG/oGtKkm0W6qbxwQtk67IluP/M8V3nN9VJIfL6tlSLw+2crykt60oKXXHwbcv3MLzpDASAsV/glahwDwcfzz06twiBMavU4tA256yAXSIKAMfNqZeNKcxXuDQ2kpfj07RkrK67TJFAMW5/dMUdqvnUiCSZodulQYX0TlqWzTBo9PnnpbJePUnt1HHcxf5srD4SxQJL/DdOSA/4LARjCY1zErnuQxAsS1qyXYmVpnGJa51Z+MFLAxWL+OM+7XyitByuzKbbGW2UCBGd8aKMAWTSKsrriVUppjNws/vihWV5wPQ6QlseQm4fFaFb0/421W9dcPDPE2Zm0dN4ztUizBJ+qZpyNdChPl3anFn1nL77Z4I07+T75farC2RtQjMRg0pXYmihOSJ+rbeI5mPIJ2nZAoXO7NO6WVrElz2IH/1sFQnFB7c14CEZmz2bt9LkSnvQ== user@home"
+  }
+}
