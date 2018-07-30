@@ -1,4 +1,5 @@
 {
+  "vmid": "102",
   "type": "lxc",
   "init_script_env": "/etc/cloudsh/ns.env",
   "params": {

@@ -1,4 +1,5 @@
 {
+  "vmid": "103",
   "type": "lxc",
   "init_script_env": "/etc/cloudsh/salt.env",
   "params": {
